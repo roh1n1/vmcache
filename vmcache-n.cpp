@@ -504,6 +504,15 @@ struct BufferManager {
       return (tier == PageState::TIER_DRAM) ? dramPool : remotePool;
    }
 
+   // Tell the page's tier policy that the page was just accessed. Only used
+   // if some policy asked for it (see ReplacementPolicy::needsOnAccess).
+   bool trackAccess = false;
+   void notifyAccess(PID pid, bool isWrite) {
+      BufferPool* pool = getPoolForTier(PageState::getTier(pageState[pid].stateAndVersion.load()));
+      if (pool)
+         pool->policy->onAccess(pid, isWrite);
+   }
+
    BufferManager();
    ~BufferManager() {}
 
@@ -617,6 +626,8 @@ struct GuardO {
                   }
                }
                version = v;
+               if (bm.trackAccess)
+                  bm.notifyAccess(pid, false);
                return;
          }
          yield(repeatCounter);
@@ -705,6 +716,8 @@ struct GuardX {
                pid = other.pid;
                ptr = other.ptr;
                ptr->dirty = true;
+               if (bm.trackAccess)
+                  bm.notifyAccess(pid, true);
                other.pid = moved;
                other.ptr = nullptr;
                return;
@@ -927,6 +940,8 @@ BufferManager::BufferManager() {
       // dramPool->targetPool stays nullptr → DRAM → SSD directly
    }
 
+   trackAccess = dramPool->policy->needsOnAccess() || (remotePool && remotePool->policy->needsOnAccess());
+
    // 4-parameter migration policy (Hyrise-style)
    userDramReadRatio = envOrDouble("DRAM_READ_RATIO", 1.0);
    userDramWriteRatio = envOrDouble("DRAM_WRITE_RATIO", 1.0);
@@ -1144,6 +1159,8 @@ Page* BufferManager::fixX(PID pid) {
                      promotionBatches++;
                   }
                }
+               if (trackAccess)
+                  notifyAccess(pid, true);
                return virtMem + pid;
             }
             break;
@@ -1211,8 +1228,11 @@ Page* BufferManager::fixS(PID pid) {
             }
 
             // Acquire shared lock
-            if (ps.tryLockS(stateAndVersion))
+            if (ps.tryLockS(stateAndVersion)) {
+               if (trackAccess)
+                  notifyAccess(pid, false);
                return virtMem + pid;
+            }
          }
       }
       yield(repeatCounter);
@@ -1413,11 +1433,12 @@ void BufferPool::evict(BufferManager* bm, bool bypassTarget, u64 minPages) {
 
    // ========== STEP 0: Ask the replacement policy for candidates ==========
    // The policy only names pages; locking them is done here.
-   vector<PID> candidates;
+   vector<PID> candidates;  // grows across calls; see selectVictims()
+   size_t examined = 0;
    while (toEvict.size() + toWrite.size() < targetEvictCount) {
-      candidates.clear();
       policy->selectVictims(batchSize, candidates);
-      for (PID pid : candidates) {
+      for (; examined < candidates.size(); examined++) {
+         PID pid = candidates[examined];
          PageState& ps = bm->getPageState(pid);
          u64 v = ps.stateAndVersion;
          if (!policy->canEvictInState(PageState::getState(v)))

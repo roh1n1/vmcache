@@ -37,9 +37,21 @@ struct ReplacementPolicy {
    // A page left this tier (evicted to SSD, demoted, or promoted away).
    virtual void onRemove(PID pid) = 0;
 
+   // Does this policy need onAccess()? If false (the default) the mechanism
+   // never calls onAccess, so the page-access hot path pays only one flag test.
+   virtual bool needsOnAccess() const { return false; }
+
+   // A resident page was just accessed (read or write). Only called if
+   // needsOnAccess() is true. Called from many threads at once, and the page
+   // may have just left this tier, so ignore PIDs you are not tracking.
+   virtual void onAccess(PID pid, bool isWrite) {}
+
    // Append up to n eviction candidates to `out`. May append fewer than n,
    // including none; the caller calls again until it has enough. The policy
    // may update its own bookkeeping while doing so (CLOCK marks pages here).
+   // `out` is NOT cleared between calls within one eviction: it already holds
+   // the candidates offered so far (the caller has looked at those), so a
+   // policy with a fixed order (LRU) should continue after them, not repeat.
    virtual void selectVictims(u64 n, vector<PID>& out) = 0;
 
    // Can a page in this PageState::getState() value still be evicted? Checked

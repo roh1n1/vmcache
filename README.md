@@ -93,7 +93,7 @@ Eviction batch size — the two binaries use different variables here:
 
 ### Page Replacement Policy — `vmcache-n` only
 * REPLACEMENT: which policy picks eviction candidates in each memory tier;
-  default=`clock`; also `random`. Policies live in
+  default=`clock`; also `random`, `lru`. Policies live in
   [page_replacement/](page_replacement/); see `policy.hpp` for the interface
   and how to add one.
 
