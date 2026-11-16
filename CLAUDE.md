@@ -90,7 +90,20 @@ and the lab sources currently live in the gitignored `_scratch/`, so they do not
 travel with a clone. Move them to a tracked `labs/` directory if they are meant
 to be part of the handoff.
 
+## Page replacement policies (`page_replacement/`)
+
+`vmcache-n` only. A policy decides *which* resident pages to evict; the
+mechanism in `BufferPool::evict` (`vmcache-n.cpp`) locks them, writes dirty
+pages back, and demotes or evicts. One policy instance per tier, chosen with
+`REPLACEMENT=<name>` (default `clock`). Interface and how to add a policy:
+`page_replacement/policy.hpp`. `vmcache-leis.cpp` and `vmcache-n-memtrk.cpp`
+do not use it.
+
 ## Gotchas
+
+- **`Marked` is CLOCK's private reference bit.** Only `ClockPolicy` sets it
+  and only it requires it (`canEvictInState`). The latching code in
+  `vmcache-n.cpp` still accepts `Marked` as a lockable state, so keep that.
 
 - **The baseline label comes from an absent key.** `plot_paper.py:140` labels a
   run `vmcache` when it has no `REMOTEGB` field, `vmcache^n(N)` when it does.

@@ -402,22 +402,22 @@ struct LibaioInterface {
 // Forward declaration
 struct BufferManager;
 
+#include "page_replacement/page_replacement.hpp"
+
 struct BufferPool {
    u64 maxCount;                    // Capacity (max pages)
    atomic<u64> usedCount;           // Current resident pages
-   ResidentPageSet* residentSet;    // Clock sweep for this tier
+   ReplacementPolicy* policy;       // Which pages to evict from this tier (REPLACEMENT=...)
    int nodeId;                      // NUMA node ID
    BufferPool* targetPool;          // Next tier (nullptr = evict to SSD)
 
-   // Constructor
-   BufferPool(u64 maxCount_, int nodeId_)
-      : maxCount(maxCount_), usedCount(0), nodeId(nodeId_),
-        targetPool(nullptr) {
-      residentSet = new ResidentPageSet(maxCount);
-   }
+   // Constructor (takes ownership of policy)
+   BufferPool(u64 maxCount_, int nodeId_, ReplacementPolicy* policy_)
+      : maxCount(maxCount_), usedCount(0), policy(policy_), nodeId(nodeId_),
+        targetPool(nullptr) {}
 
    ~BufferPool() {
-      delete residentSet;
+      delete policy;
    }
 
    void evict(BufferManager* bm, bool bypassTarget, u64 minPages = 0);
@@ -436,7 +436,7 @@ struct BufferManager {
    int blockfd;
    int exmapfd;
 
-   // BufferPool hierarchy (replaces single residentSet)
+   // BufferPool hierarchy (each pool owns its replacement policy)
    BufferPool* dramPool;            // Primary tier (always exists)
    BufferPool* remotePool;          // Secondary tier (nullable if REMOTEGB=0)
 
@@ -597,8 +597,8 @@ struct GuardO {
                         bm.dramPool->ensureFreePages(&bm, bm.shouldBypassTarget(bm.dramPool, false), toPromote.size());
                         bm.migratePages(toPromote, bm.dramPool->nodeId);
                         for (PID p : toPromote) {
-                           bm.remotePool->residentSet->remove(p);
-                           bm.dramPool->residentSet->insert(p);
+                           bm.remotePool->policy->onRemove(p);
+                           bm.dramPool->policy->onInsert(p);
                            u64 vv = bm.getPageState(p).stateAndVersion.load();
                            bm.getPageState(p).stateAndVersion.store(
                               PageState::withTier(vv, PageState::TIER_DRAM),
@@ -911,11 +911,16 @@ BufferManager::BufferManager() {
       exit(EXIT_FAILURE);
    }
 
-   // Create BufferPool hierarchy
-   dramPool = new BufferPool(physCount, dramNode);
+   // Page states must exist before the pools: the replacement policies read them.
+   pageState = (PageState*)allocHuge(virtCount * sizeof(PageState));
+   for (u64 i=0; i<virtCount; i++)
+      pageState[i].init();
+
+   // Create BufferPool hierarchy (one replacement policy instance per tier)
+   dramPool = new BufferPool(physCount, dramNode, makeReplacementPolicy(physCount, pageState));
 
    if (remoteSize > 0) {
-      remotePool = new BufferPool(remotePhysCount, remoteNode);
+      remotePool = new BufferPool(remotePhysCount, remoteNode, makeReplacementPolicy(remotePhysCount, pageState));
       dramPool->targetPool = remotePool;  // Chain: DRAM → REMOTE → SSD
    } else {
       remotePool = nullptr;
@@ -977,9 +982,6 @@ BufferManager::BufferManager() {
       madvise(virtMem, virtAllocSize, MADV_NOHUGEPAGE);
    }
 
-   pageState = (PageState*)allocHuge(virtCount * sizeof(PageState));
-   for (u64 i=0; i<virtCount; i++)
-      pageState[i].init();
    if (virtMem == MAP_FAILED)
       die("mmap failed");
 
@@ -1009,6 +1011,7 @@ BufferManager::BufferManager() {
            << ",mode=" << movePages2Mode << "]";
    }
    cerr << " exmap:" << useExmap << endl;
+   cerr << "replacement policy: " << dramPool->policy->name() << endl;
 }
 
 // allocated new page and fix it
@@ -1023,7 +1026,7 @@ Page* BufferManager::allocPage() {
    u64 stateAndVersion = getPageState(pid).stateAndVersion;
    bool succ = getPageState(pid).tryLockX(stateAndVersion);
    assert(succ);
-   dramPool->residentSet->insert(pid);
+   dramPool->policy->onInsert(pid);
 
    // Set tier to DRAM (bits [55:54] = 0)
    u64 v = getPageState(pid).stateAndVersion.load();
@@ -1067,7 +1070,7 @@ void BufferManager::handleFault(PID pid) {
       u64 v = getPageState(pid).stateAndVersion.load();
       getPageState(pid).stateAndVersion.store(PageState::withTier(v, PageState::TIER_DRAM),
                                                std::memory_order_relaxed);
-      dramPool->residentSet->insert(pid);
+      dramPool->policy->onInsert(pid);
    } else {
       // Case 2: Load to REMOTE tier (respect NUMA tier in hierarchy)
       remotePool->usedCount++;
@@ -1084,7 +1087,7 @@ void BufferManager::handleFault(PID pid) {
       u64 v = getPageState(pid).stateAndVersion.load();
       getPageState(pid).stateAndVersion.store(PageState::withTier(v, PageState::TIER_REMOTE),
                                                std::memory_order_relaxed);
-      remotePool->residentSet->insert(pid);
+      remotePool->policy->onInsert(pid);
    }
 }
 
@@ -1116,8 +1119,8 @@ Page* BufferManager::fixX(PID pid) {
 
                      // Update tracking for all promoted pages
                      for (PID p : toPromote) {
-                        remotePool->residentSet->remove(p);
-                        dramPool->residentSet->insert(p);
+                        remotePool->policy->onRemove(p);
+                        dramPool->policy->onInsert(p);
 
                         // Update tier to DRAM
                         u64 v = getPageState(p).stateAndVersion.load();
@@ -1179,8 +1182,8 @@ Page* BufferManager::fixS(PID pid) {
                      migratePages(toPromote, dramPool->nodeId);
                      // Update tracking for all promoted pages
                      for (PID p : toPromote) {
-                        remotePool->residentSet->remove(p);
-                        dramPool->residentSet->insert(p);
+                        remotePool->policy->onRemove(p);
+                        dramPool->policy->onInsert(p);
 
                         u64 v = getPageState(p).stateAndVersion.load();
                         getPageState(p).stateAndVersion.store(
@@ -1338,7 +1341,7 @@ vector<PID> BufferManager::collectPromotionBatch(PID currentPid) {
    u64 maxScans = promoteBatchMin * promoteBatchScanMultiplier;
 
    // Scan REMOTE pool for other hot pages to add to batch
-   remotePool->residentSet->iterateClockBatch(maxScans, [&](PID pid) {
+   remotePool->policy->scanResident(maxScans, [&](PID pid) {
       if (batch.size() >= promoteBatchMin) return;    // Target reached
       if (pid == currentPid) return;                  // Skip current (already in batch)
 
@@ -1408,29 +1411,24 @@ void BufferPool::evict(BufferManager* bm, bool bypassTarget, u64 minPages) {
    vector<PID> toWrite;
    toWrite.reserve(targetEvictCount);
 
-   // ========== STEP 0: Clock sweep to find candidates ==========
+   // ========== STEP 0: Ask the replacement policy for candidates ==========
+   // The policy only names pages; locking them is done here.
+   vector<PID> candidates;
    while (toEvict.size() + toWrite.size() < targetEvictCount) {
-      residentSet->iterateClockBatch(batchSize, [&](PID pid) {
+      candidates.clear();
+      policy->selectVictims(batchSize, candidates);
+      for (PID pid : candidates) {
          PageState& ps = bm->getPageState(pid);
          u64 v = ps.stateAndVersion;
-
-         switch (PageState::getState(v)) {
-            case PageState::Marked:
-               // Already marked: ready to evict
-               if (bm->virtMem[pid].dirty) {
-                  if (ps.tryLockS(v))
-                     toWrite.push_back(pid);  // Dirty: must write first
-               } else {
-                  toEvict.push_back(pid);     // Clean: evict directly
-               }
-               break;
-            case PageState::Unlocked:
-               ps.tryMark(v);  // First encounter: give second chance
-               break;
-            default:
-               break;  // Skip locked/shared pages
+         if (!policy->canEvictInState(PageState::getState(v)))
+            continue;  // locked/shared, or no longer evictable
+         if (bm->virtMem[pid].dirty) {
+            if (ps.tryLockS(v))
+               toWrite.push_back(pid);  // Dirty: must write first
+         } else {
+            toEvict.push_back(pid);     // Clean: evict directly
          }
-      });
+      }
    }
 
    // ========== STEP 1: Write dirty pages (ONLY if evicting to SSD) ==========
@@ -1445,7 +1443,7 @@ void BufferPool::evict(BufferManager* bm, bool bypassTarget, u64 minPages) {
    toEvict.erase(std::remove_if(toEvict.begin(), toEvict.end(), [&](PID pid) {
       PageState& ps = bm->getPageState(pid);
       u64 v = ps.stateAndVersion;
-      return (PageState::getState(v) != PageState::Marked) || !ps.tryLockX(v);
+      return !policy->canEvictInState(PageState::getState(v)) || !ps.tryLockX(v);
    }), toEvict.end());
 
    // ========== STEP 3: Upgrade dirty pages from shared to exclusive ==========
@@ -1480,8 +1478,8 @@ void BufferPool::evict(BufferManager* bm, bool bypassTarget, u64 minPages) {
       bm->migratePages(toEvict, targetPool->nodeId);
 
       for (PID pid : toEvict) {
-         residentSet->remove(pid);
-         targetPool->residentSet->insert(pid);
+         policy->onRemove(pid);
+         targetPool->policy->onInsert(pid);
          // Transition: Locked(this tier) → Unlocked(target tier), version++
          bm->getPageState(pid).unlockXWithTier(
             (targetPool->nodeId == bm->dramPool->nodeId) ? PageState::TIER_DRAM : PageState::TIER_REMOTE
@@ -1510,7 +1508,7 @@ void BufferPool::evict(BufferManager* bm, bool bypassTarget, u64 minPages) {
       }
 
       for (PID pid : toEvict) {
-         residentSet->remove(pid);
+         policy->onRemove(pid);
          bm->getPageState(pid).unlockXEvicted();  // Locked → Evicted, version++
       }
 

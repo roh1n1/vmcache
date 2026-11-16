@@ -10,10 +10,10 @@
 
 all: vmcache-n vmcache-leis
 
-vmcache-n: vmcache-n.cpp tpcc/*pp ycsb/*pp
+vmcache-n: vmcache-n.cpp tpcc/*pp ycsb/*pp page_replacement/*pp
 	g++ -DNDEBUG -O3 -std=c++20 -g -fnon-call-exceptions -fasynchronous-unwind-tables vmcache-n.cpp -o vmcache-n -laio -lnuma
 
-vmcache-n-debug: vmcache-n.cpp tpcc/*pp ycsb/*pp
+vmcache-n-debug: vmcache-n.cpp tpcc/*pp ycsb/*pp page_replacement/*pp
 	g++ -O1 -g -fsanitize=address -fno-omit-frame-pointer -std=c++20 vmcache-n.cpp -o vmcache-n-debug -laio -lnuma
 
 # Baseline has no YCSB workload, hence no ycsb/ dependency.

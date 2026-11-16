@@ -91,6 +91,12 @@ Eviction batch size — the two binaries use different variables here:
 * EVICT_BATCH_SSD (`vmcache-n` only): batch size for eviction to SSD; default=64
   - `vmcache-n` ignores BATCH; `vmcache-leis` ignores both EVICT_BATCH variables.
 
+### Page Replacement Policy — `vmcache-n` only
+* REPLACEMENT: which policy picks eviction candidates in each memory tier;
+  default=`clock` (currently the only one). Policies live in
+  [page_replacement/](page_replacement/); see `policy.hpp` for the interface
+  and how to add one.
+
 ### YCSB Workload — `vmcache-n` only
 * YCSB: if set, run YCSB instead of TPC-C/random read; the first character
   selects the workload (A-F), e.g. `YCSB=A`. Unset = not a YCSB run.
