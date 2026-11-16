@@ -13,7 +13,9 @@
 //
 // A policy never locks a page and never moves one. It only tracks residency
 // and returns PIDs. The mechanism locks the returned PIDs itself and skips any
-// page that is no longer evictable, so a policy may return stale candidates.
+// page that is no longer evictable, so a policy may return stale or repeated
+// candidates (the second copy of a page fails the state check once the first
+// one is locked).
 //
 // One policy instance exists per BufferPool (i.e. per memory tier), so a
 // policy only ever sees the pages resident in its own tier.
