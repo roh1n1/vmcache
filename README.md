@@ -93,9 +93,11 @@ Eviction batch size — the two binaries use different variables here:
 
 ### Page Replacement Policy — `vmcache-n` only
 * REPLACEMENT: which policy picks eviction candidates in each memory tier;
-  default=`clock`; also `random`, `lru`. Policies live in
+  default=`clock`; also `random`, `lru`, `leanevict`. Policies live in
   [page_replacement/](page_replacement/); see `policy.hpp` for the interface
   and how to add one.
+* LEAN_COOLING_PCT: size of LeanEvict's cooling stage as a percentage of the
+  pool (1-90); default=30. Only used with `REPLACEMENT=leanevict`.
 
 ### YCSB Workload — `vmcache-n` only
 * YCSB: if set, run YCSB instead of TPC-C/random read; the first character

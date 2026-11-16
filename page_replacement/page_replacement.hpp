@@ -6,6 +6,7 @@
 #include "clock.hpp"
 #include "random.hpp"
 #include "lru.hpp"
+#include "lean_evict.hpp"
 
 // Build the policy named by REPLACEMENT (default "clock") for one tier.
 // Exits with the list of valid names if the name is unknown.
@@ -18,6 +19,8 @@ static ReplacementPolicy* makeReplacementPolicy(u64 maxCount, PageState* pageSta
       return new RandomPolicy(maxCount);
    if (name == "lru")
       return new LruPolicy();
-   cerr << "unknown REPLACEMENT='" << name << "'; available: clock, random, lru" << endl;
+   if (name == "leanevict")
+      return new LeanEvictPolicy(maxCount, pageState);
+   cerr << "unknown REPLACEMENT='" << name << "'; available: clock, random, lru, leanevict" << endl;
    exit(EXIT_FAILURE);
 }
